@@ -1,0 +1,442 @@
+// GARDENA smart Water Control 19033-20
+// plan44 p44Script 
+// Lokal: WSS 8443, Basic Auth, LwM2M Gen2
+// WICHTIG: SSL-Zertifikatspruefung der P44-Firmware muss getestet werden.
+// Achtung: Die lokale Discovery enthaelt KEINE Cloud-UUID!
+// Daher wird das einzige passende Modell 2812 automatisch gefunden.
+// Bei mehreren passenden Geraeten wird aus Sicherheitsgruenden NICHT geschaltet.
+// Kein Cloud-Zugriff. Keine sekundaeren Einzelgeraeteabfragen.
+
+var gardena_host = '192.168.1.1'  //ANPASSEN !! IP des Gardena Gateway
+var gardena_uuid = 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'   //ANPASSEN !!  Gardena Gateway ID
+var gardena_password = 'xxxxxxxx'   // ANPASSEN!!  die ersten 8 Zeichen der Gateway ID
+var gardena_auth = 'Basic ' + encode('base64', '_:' + gardena_password)
+var gardena_device = ''
+var gardena_device_found = false
+var gardena_valve = '0'
+var gardena_duration = 600
+var gardena_ws = null
+var gardena_ready = false
+var gardena_online = -1
+var gardena_watering = -1
+var gardena_battery = -1
+var gardena_battery_state = -1
+var gardena_temperature = -1000
+var gardena_timeslot_state = -1
+var gardena_timeslot_actuator = -1
+var gardena_seq = 0
+var gardena_pending_action = ''
+var gardena_pending_id = ''
+var gardena_discovery_done = false
+var gardena_discovery_lemonbeat = false
+var gardena_discovery_lwm2m = false
+var gardena_timeslots = {}
+
+function gardena_state(name, value) {
+  // Die plan44/vDC-API erwartet bei Enumeration-States Strings,
+  // nicht die numerischen Indizes der Enum-Liste.
+  var enum_value = ''
+  if (name == 'Verbindung') {
+    if (value == 1) {
+      enum_value = 'Online'
+    } else {
+      enum_value = 'Offline'
+    }
+  } else if (name == 'Bewasserung') {
+    if (value == 1) {
+      enum_value = 'Ein'
+    } else {
+      enum_value = 'Aus'
+    }
+  } else if (name == 'Batterie') {
+    if (value == 2) {
+      enum_value = 'Kritisch'
+    } else if (value == 1) {
+      enum_value = 'Niedrig'
+    } else {
+      enum_value = 'OK'
+    }
+  } else {
+    log('GARDENA: Unbekannter State: ' + name)
+    return
+  }
+  var changes = {}
+  changes[name] = enum_value
+  message({message:'pushNotification',statechange:changes})
+  log('GARDENA: State ' + name + ' = ' + enum_value)
+}
+
+function gardena_event(name) {
+  message({message:'pushNotification',events:[name]})
+}
+
+function gardena_online_set(value) {
+  if (gardena_online != value) {
+    gardena_online = value
+    gardena_state('Verbindung', value)
+    if (value == 1) {
+      gardena_event('GARDENA verbunden')
+      message({message:'opstate',level:100,text:'Online'})
+    } else {
+      gardena_event('GARDENA getrennt')
+      message({message:'opstate',level:0,text:'Offline'})
+    }
+  }
+}
+
+function gardena_watering_set(value) {
+  if (gardena_watering != value) {
+    var previous = gardena_watering
+    gardena_watering = value
+    gardena_state('Bewasserung',value)
+    if (previous != -1) {
+      if (value == 1) {
+        gardena_event('Bewässerung gestartet')
+      } else {
+        gardena_event('Bewässerung gestoppt')
+      }
+    }
+  }
+}
+
+function gardena_send(op,path,payload) {
+  if (gardena_ws == null || !gardena_ready || !gardena_device_found || gardena_device == '') {
+    log('GARDENA: Senden nicht moeglich, keine bestaetigte Verbindung')
+    return ''
+  }
+  gardena_seq = gardena_seq + 1
+  var rid = 'p44gardena-' + string(gardena_seq)
+  var req = {entity:{path:path,service:'lwm2mserver',device:gardena_device},op:op,request_id:rid}
+  if (payload != null) {
+    req.payload = payload
+  }
+  gardena_ws.send(string([req]))
+  log('GARDENA TX: ' + op + ' ' + path)
+  return rid
+}
+
+function gardena_command(action,seconds) {
+  if (gardena_pending_action != '') {
+    log('GARDENA: Kommando noch nicht bestaetigt')
+    message({message:'confirmAction',action:action,errorcode:1,errortext:'Kommando noch offen'})
+    return
+  }
+  var path = 'actuator/' + gardena_valve + '/stop'
+  var payload = {as:["0='18'"]}
+  if (seconds > 0) {
+    path = 'actuator/' + gardena_valve + '/start'
+    payload = {as:["0='18',1='" + string(seconds) + "'"]}
+  }
+  var rid = gardena_send('execute',path,payload)
+  if (rid == '') {
+    message({message:'confirmAction',action:action,errorcode:1,errortext:'Gateway oder Water Control nicht bereit'})
+  } else {
+    gardena_pending_action = action
+    gardena_pending_id = rid
+  }
+}
+
+function gardena_apply_event(ev) {
+  if (ev.entity == null) {
+    return
+  }
+  if (ev.entity.device != gardena_device) {
+    return
+  }
+  var path = string(ev.entity.path)
+  var p = ev.payload
+  if (p == null) {
+    return
+  }
+  if (path == 'connection_status/0/online' && p.vb != null) {
+    if (p.vb) {
+      gardena_online_set(1)
+    } else {
+      gardena_online_set(0)
+    }
+  }
+  if (path == 'device/0/battery_level' && (p.vi != null || p.vf != null)) {
+    var b = 0
+    if (p.vi != null) {
+      b = number(p.vi)
+    } else {
+      b = number(p.vf)
+    }
+    if (b != gardena_battery) {
+      gardena_battery = b
+      var battery_state = 0
+      if (b < 15) {
+        battery_state = 2
+      } else if (b < 30) {
+        battery_state = 1
+      }
+      if (battery_state != gardena_battery_state) {
+        var previous_battery_state = gardena_battery_state
+        gardena_battery_state = battery_state
+        gardena_state('Batterie',battery_state)
+        if (battery_state == 2 && previous_battery_state != -1) {
+          gardena_event('Batteriestand niedrig')
+        }
+      }
+      log('GARDENA: Batteriestand ' + string(b) + '%')
+    }
+  }
+  if (path == 'temperature/0/sensor_value' && p.vf != null) {
+    var t = number(p.vf)
+    if (t != gardena_temperature) {
+      gardena_temperature = t
+      // Temperatur ist ein Messwert und wird nicht als numeric State gemeldet.
+      log('GARDENA: Temperatur ' + string(t) + ' °C')
+    }
+  }
+  if (path == 'actuator/0/state' && p.vi != null) {
+    log('GARDENA: Ventilstatus = ' + string(p.vi))
+  }
+  // Gen2: Wasser laeuft, wenn ein Timeslot RUNNING (5) ist
+  // und diesem der hier konfigurierte Aktuator zugeordnet ist.
+  if (path == 'timeslot/0/state' && p.vi != null) {
+    gardena_timeslot_state = number(p.vi)
+  }
+  if (path == 'timeslot/0/actuator' && p.vi != null) {
+    gardena_timeslot_actuator = number(p.vi)
+  }
+  if (gardena_timeslot_state == 5 && gardena_timeslot_actuator == number(gardena_valve)) {
+    gardena_watering_set(1)
+  }
+  if (gardena_timeslot_state >= 0 && gardena_timeslot_state != 5) {
+    gardena_watering_set(0)
+  }
+}
+
+// Discovery-Objekt verwendet lokale IDs als Schluessel.
+// Die Cloud-UUID wird in diesem Snapshot NICHT mitgeliefert.
+// Deshalb ist bei genau einem Gen2 Water Control Modell 2812 eine
+// automatische, eindeutige Zuordnung moeglich. Keine Annahme ueber
+// das Abschneiden der ersten acht Zeichen der Cloud-UUID.
+function gardena_discover_device(payload) {
+  var candidate = ''
+  var matches = 0
+  if (payload == null) {
+    return false
+  }
+  foreach payload as localid,localdevice {
+    if (localdevice != null) {
+      if (localdevice.device != null) {
+        if (localdevice.device['0'] != null) {
+          var info = localdevice.device['0']
+          if (info.model_number != null) {
+            if (info.model_number.vs == '2812') {
+              matches = matches + 1
+              candidate = string(localid)
+            }
+          }
+        }
+      }
+    }
+  }
+  if (matches == 1) {
+    gardena_device = candidate
+    gardena_device_found = true
+    log('GARDENA: 19033 automatisch gefunden, lokale ID = ' + gardena_device)
+    return true
+  }
+  gardena_device = ''
+  gardena_device_found = false
+  if (matches == 0) {
+    log('GARDENA: Kein Water Control Modell 2812 in der lokalen Discovery')
+  } else {
+    log('GARDENA: Mehrere Water Control Modell 2812 gefunden (' + string(matches) + '), keine eindeutige UUID-Zuordnung moeglich')
+  }
+  return false
+}
+
+// Das ist ein vollstaendiger Snapshot, keine Einzelwert-Notification.
+function gardena_apply_snapshot(payload) {
+  if (payload == null) {
+    return
+  }
+  if (!gardena_discover_device(payload)) {
+    return
+  }
+  var device = payload[gardena_device]
+  if (device == null) {
+    log('GARDENA: WARNUNG: lokale Geraete-ID nicht in Discovery gefunden: ' + gardena_device)
+    return
+  }
+  log('GARDENA: Lokales Geraet in Discovery gefunden: ' + gardena_device)
+  if (device.connection_status != null) {
+    if (device.connection_status['0'] != null) {
+      if (device.connection_status['0'].online != null) {
+        if (device.connection_status['0'].online.vb == true) {
+          gardena_online_set(1)
+        } else {
+          gardena_online_set(0)
+        }
+      }
+    }
+  }
+  if (device.device != null) {
+    if (device.device['0'] != null) {
+      var d = device.device['0']
+      if (d.battery_level != null) {
+        if (d.battery_level.vi != null) {
+          gardena_apply_event({entity:{device:gardena_device,path:'device/0/battery_level'},payload:{vi:d.battery_level.vi}})
+        }
+      }
+      if (d.model_number != null) {
+        log('GARDENA: Geraetemodell = ' + string(d.model_number.vs))
+      }
+    }
+  }
+  if (device.actuator != null) {
+    if (device.actuator['0'] != null) {
+      var actuator = device.actuator['0']
+      if (actuator.available != null) {
+        log('GARDENA: Ventil verfuegbar = ' + string(actuator.available.vb))
+      }
+      if (actuator.state != null) {
+        log('GARDENA: Ventilzustand = ' + string(actuator.state.vi))
+      }
+    }
+  }
+  // Mehrere Slots beruecksichtigen: Slot 0 alleine ist nicht aussagekraeftig.
+  var watering = 0
+  if (device.timeslot != null) {
+    foreach device.timeslot as slotid,slotdata {
+      if (slotdata != null) {
+        if (slotdata.state != null && slotdata.actuator != null) {
+          if (slotdata.state.vi == 5 && slotdata.actuator.vi == number(gardena_valve)) {
+            watering = 1
+          }
+        }
+      }
+    }
+    gardena_watering_set(watering)
+  }
+  if (device.wake_on_radio != null) {
+    if (device.wake_on_radio['0'] != null) {
+      if (device.wake_on_radio['0'].wakeup_channel != null) {
+        log('GARDENA: Wake-on-Radio-Kanal = ' + string(device.wake_on_radio['0'].wakeup_channel.vi))
+      }
+    }
+  }
+}
+
+function gardena_receive(raw) {
+  try {
+    var arr = json(raw)
+    foreach arr as e {
+      if (e.request_id == gardena_pending_id && gardena_pending_action != '') {
+        var action = gardena_pending_action
+        gardena_pending_id = ''
+        gardena_pending_action = ''
+        if (e.success == true) {
+          message({message:'confirmAction',action:action,errorcode:0})
+          log('GARDENA: Befehl bestaetigt: ' + action)
+        } else {
+          message({message:'confirmAction',action:action,errorcode:1,errortext:'Gateway hat Befehl abgelehnt'})
+          gardena_event('Bewässerungsfehler')
+          log('GARDENA: Befehl abgelehnt: ' + string(e.payload))
+          if (string(e.payload) != '') {
+            log('GARDENA: Hinweis: Geraetestatus separat von Gateway-Verbindung pruefen')
+          }
+        }
+      }
+      if (e.op == 'update' || e.op == 'overwrite') {
+        gardena_apply_event(e)
+      }
+      // Discovery sauber anhand der beiden Request-IDs auswerten.
+      // Gateway erreichbar bedeutet NICHT Water Control online.
+      if (e.request_id != null) {
+        var id = string(e.request_id)
+        if (substr(id,0,13) == 'p44discover-l') {
+          if (e.success == true) {
+            gardena_discovery_lemonbeat = true
+            log('GARDENA: lemonbeatd Discovery: ' + string(e.payload))
+          } else {
+            log('GARDENA: lemonbeatd Discovery Fehler: ' + string(e.payload))
+          }
+        }
+        if (substr(id,0,13) == 'p44discover-w') {
+          if (e.success == true) {
+            gardena_discovery_lwm2m = true
+            log('GARDENA: lwm2mserver Discovery empfangen')
+            gardena_apply_snapshot(e.payload)
+          } else {
+            log('GARDENA: lwm2mserver Discovery Fehler: ' + string(e.payload))
+          }
+        }
+      }
+      if (gardena_discovery_lwm2m && !gardena_discovery_done) {
+        gardena_discovery_done = true
+        gardena_ready = gardena_device_found
+        if (gardena_ready) {
+          log('GARDENA: Discovery erfolgreich, lokale Geraete-ID ermittelt')
+        } else {
+          log('GARDENA: Discovery empfangen, keine eindeutige Geraetezuordnung; Actions gesperrt')
+        }
+      }
+    }
+  } catch as e {
+    log('GARDENA: Empfangsfehler: ' + e)
+  }
+}
+
+function gardena_connect() {
+  try {
+    // WSS-Pruefung selbstsignierter Zertifikate: firmwareabhaengig.
+    gardena_ws = websocket({
+      url:'wss://' + gardena_host + ':8443',
+      headers:{Authorization:gardena_auth},
+      pinginterval:30
+    })
+    log('GARDENA: WebSocket erstellt')
+    log('GARDENA: Konfigurierte Cloud-UUID = ' + gardena_uuid + ' (nur Identifikationshinweis; nicht in lokaler Discovery enthalten)')
+    // Erst nach einer Antwort des Gateway wird "Verbunden" gemeldet.
+  } catch as e {
+    log('GARDENA: WebSocket Fehler: ' + e)
+    gardena_online_set(0)
+  }
+}
+
+on (message()) as m {
+  if (m.message == 'invokeAction') {
+    if (m.action == 'aStart5') {
+      gardena_command(m.action,300)
+    } else if (m.action == 'bStart10') {
+      gardena_command(m.action,600)
+    } else if (m.action == 'cStart20') {
+      gardena_command(m.action,1200)
+    } else if (m.action == 'dStart30') {
+      gardena_command(m.action,1800)
+    } else if (m.action == 'eStop') {
+      gardena_command(m.action,0)
+    } else {
+      message({message:'confirmAction',action:m.action,errorcode:1,errortext:'Unbekannte Action'})
+    }
+  }
+}
+
+gardena_connect()
+
+if (gardena_ws != null) {
+  on (gardena_ws.message()) as raw {
+    gardena_receive(raw)
+  }
+}
+
+// Einmalige Geraeteliste anfordern und Zustand der Verbindung pruefen.
+// Anfangsbestand aus der Discovery wird uebernommen.
+on (every(0:00:10)) {
+  if (!gardena_discovery_done && gardena_ws != null) {
+    gardena_seq = gardena_seq + 1
+    var req = [
+      {entity:{path:'devices',service:'lemonbeatd'},op:'read',request_id:'p44discover-l' + string(gardena_seq)},
+      {entity:{path:'devices',service:'lwm2mserver'},op:'read',request_id:'p44discover-w' + string(gardena_seq)}
+    ]
+    gardena_ws.send(string(req))
+    log('GARDENA: Discovery angefordert (lemonbeatd + lwm2mserver)')
+  }
+}
+
+return true

@@ -1,0 +1,84 @@
+{
+  "message": "init",
+  "protocol": "json",
+  "name": "GARDENA mart water control",
+  "vendorname": "GARDENA",
+  "modelname": "smart Water Control 19033-20",
+  "hardwarename": "Bewässerungsventil",
+  "colorclass": 8,
+  "group": 8,
+  "output": "basic",
+  "oemmodelguid": "gs1:(01)1234567890123",
+  "dynamicactions": {
+    "aStart5": {
+      "title": "Bewässerung 5 Minuten",
+      "description": "Startet die Bewässerung für 5 Minuten"
+    },
+    "bStart10": {
+      "title": "Bewässerung 10 Minuten",
+      "description": "Startet die Bewässerung für 10 Minuten"
+    },
+    "cStart20": {
+      "title": "Bewässerung 20 Minuten",
+      "description": "Startet die Bewässerung für 20 Minuten"
+    },
+    "dStart30": {
+      "title": "Bewässerung 30 Minuten",
+      "description": "Startet die Bewässerung für 30 Minuten"
+    },
+    "eStop": {
+      "title": "Bewässerung stoppen",
+      "description": "Stoppt die Bewässerung sofort"
+    }
+  },
+  "states": {
+    "Verbindung": {
+      "type": "enumeration",
+      "values": [
+        "!Offline",
+        "Online"
+      ]
+    },
+    "Bewasserung": {
+      "type": "enumeration",
+      "values": [
+        "!Aus",
+        "Ein"
+      ]
+    },
+    "Batterie": {
+      "type": "enumeration",
+      "values": [
+        "!OK",
+        "Niedrig",
+        "Kritisch"
+      ]
+    }
+  },
+  "events": {
+    "GARDENA verbunden": {
+      "description": "Verbindung zum GARDENA Gateway hergestellt",
+      "type": "boolean"
+    },
+    "GARDENA getrennt": {
+      "description": "Verbindung zum GARDENA Gateway verloren",
+      "type": "boolean"
+    },
+    "Bewässerung gestartet": {
+      "description": "Bewässerung wurde gestartet",
+      "type": "boolean"
+    },
+    "Bewässerung gestoppt": {
+      "description": "Bewässerung wurde beendet",
+      "type": "boolean"
+    },
+    "Batteriestand niedrig": {
+      "description": "Batteriestand des Ventils ist niedrig",
+      "type": "boolean"
+    },
+    "Bewässerungsfehler": {
+      "description": "GARDENA Gateway hat einen Steuerbefehl abgelehnt",
+      "type": "boolean"
+    }
+  }
+}
