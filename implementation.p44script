@@ -7,9 +7,9 @@
 // Bei mehreren passenden Geraeten wird aus Sicherheitsgruenden NICHT geschaltet.
 // Kein Cloud-Zugriff. Keine sekundaeren Einzelgeraeteabfragen.
 
-var gardena_host = '192.168.1.1'  //ANPASSEN !! IP des Gardena Gateway
-var gardena_uuid = 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'   //ANPASSEN !!  Gardena Gateway ID
-var gardena_password = 'xxxxxxxx'   // ANPASSEN!!  die ersten 8 Zeichen der Gateway ID
+var gardena_host = 'GATEWAY_IP_EINTRAGEN'  // ANPASSEN !! Gardena Gateway IP
+var gardena_uuid = 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx' // ANPASSEN!! Gardena Gateway-ID eintragen
+var gardena_password = 'GATEWAY_PASSWORT_EINTRAGEN' // ANPASSEN !! Erste 8 Zeichen der Gateway-ID
 var gardena_auth = 'Basic ' + encode('base64', '_:' + gardena_password)
 var gardena_device = ''
 var gardena_device_found = false
@@ -75,10 +75,10 @@ function gardena_online_set(value) {
     gardena_online = value
     gardena_state('Verbindung', value)
     if (value == 1) {
-      gardena_event('GARDENA verbunden')
+      gardena_event('GARDENAVerbunden')
       message({message:'opstate',level:100,text:'Online'})
     } else {
-      gardena_event('GARDENA getrennt')
+      gardena_event('GARDENAGetrennt')
       message({message:'opstate',level:0,text:'Offline'})
     }
   }
@@ -91,9 +91,9 @@ function gardena_watering_set(value) {
     gardena_state('Bewasserung',value)
     if (previous != -1) {
       if (value == 1) {
-        gardena_event('Bewässerung gestartet')
+        gardena_event('BewaesserungGestartet')
       } else {
-        gardena_event('Bewässerung gestoppt')
+        gardena_event('BewaesserungGestoppt')
       }
     }
   }
@@ -175,7 +175,7 @@ function gardena_apply_event(ev) {
         gardena_battery_state = battery_state
         gardena_state('Batterie',battery_state)
         if (battery_state == 2 && previous_battery_state != -1) {
-          gardena_event('Batteriestand niedrig')
+          gardena_event('BatteriestandNiedrig')
         }
       }
       log('GARDENA: Batteriestand ' + string(b) + '%')
@@ -322,6 +322,80 @@ function gardena_apply_snapshot(payload) {
   }
 }
 
+// GARDENA meldet Aenderungen aus der App auch als gebuendelte Updates:
+// entity.path ist leer, die Werte stehen in payload.actuator und payload.timeslot.
+// Diese Funktion wertet nur solche Updates aus; WebSocket/Discovery bleiben unveraendert.
+function gardena_apply_bulk_update(ev) {
+  if (ev.entity == null) {
+    return
+  }
+  if (ev.entity.device != gardena_device) {
+    return
+  }
+  if (string(ev.entity.path) != '') {
+    return
+  }
+  if (ev.payload == null) {
+    return
+  }
+
+  var p = ev.payload
+  var valve_state_known = false
+  var valve_state = -1
+
+  if (p.actuator != null) {
+    if (p.actuator[gardena_valve] != null) {
+      var actuator = p.actuator[gardena_valve]
+      if (actuator.state != null) {
+        if (actuator.state.vi != null) {
+          valve_state_known = true
+          valve_state = number(actuator.state.vi)
+          log('GARDENA: App-Update Ventilzustand = ' + string(valve_state))
+        }
+      }
+    }
+  }
+
+  if (p.timeslot != null) {
+    foreach p.timeslot as slotid,slotdata {
+      if (slotid != '_urn') {
+        if (slotdata != null) {
+          if (slotdata.state != null) {
+            if (slotdata.state.vi != null) {
+              log('GARDENA: App-Update Timeslot ' + string(slotid) + ' = ' + string(slotdata.state.vi))
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Zustand direkt am Aktuator ist bei gebuendelten Updates eindeutiger
+  // als ein einzelner Timeslot, da mehrere Timeslots existieren koennen.
+  if (valve_state_known) {
+    if (valve_state == 2) {
+      gardena_watering_set(1)
+    } else if (valve_state == 0) {
+      gardena_watering_set(0)
+    }
+  } else {
+    // Ohne Aktuatorwert nur ein ausdrueckliches RUNNING auswerten.
+    if (p.timeslot != null) {
+      foreach p.timeslot as slotid,slotdata {
+        if (slotid != '_urn') {
+          if (slotdata != null) {
+            if (slotdata.state != null && slotdata.actuator != null) {
+              if (slotdata.state.vi == 5 && slotdata.actuator.vi == number(gardena_valve)) {
+                gardena_watering_set(1)
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
 function gardena_receive(raw) {
   try {
     var arr = json(raw)
@@ -335,7 +409,7 @@ function gardena_receive(raw) {
           log('GARDENA: Befehl bestaetigt: ' + action)
         } else {
           message({message:'confirmAction',action:action,errorcode:1,errortext:'Gateway hat Befehl abgelehnt'})
-          gardena_event('Bewässerungsfehler')
+          gardena_event('Bewaesserungsfehler')
           log('GARDENA: Befehl abgelehnt: ' + string(e.payload))
           if (string(e.payload) != '') {
             log('GARDENA: Hinweis: Geraetestatus separat von Gateway-Verbindung pruefen')
@@ -343,6 +417,7 @@ function gardena_receive(raw) {
         }
       }
       if (e.op == 'update' || e.op == 'overwrite') {
+        gardena_apply_bulk_update(e)
         gardena_apply_event(e)
       }
       // Discovery sauber anhand der beiden Request-IDs auswerten.
@@ -421,6 +496,7 @@ gardena_connect()
 
 if (gardena_ws != null) {
   on (gardena_ws.message()) as raw {
+    log('GARDENA RX RAW: ' + string(raw))
     gardena_receive(raw)
   }
 }

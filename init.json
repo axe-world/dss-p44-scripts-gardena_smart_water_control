@@ -1,7 +1,7 @@
 {
   "message": "init",
   "protocol": "json",
-  "name": "GARDENA mart water control",
+  "name": "GARDENA smart water control",
   "vendorname": "GARDENA",
   "modelname": "smart Water Control 19033-20",
   "hardwarename": "Bewässerungsventil",
@@ -56,27 +56,27 @@
     }
   },
   "events": {
-    "GARDENA verbunden": {
+    "GARDENAVerbunden": {
       "description": "Verbindung zum GARDENA Gateway hergestellt",
       "type": "boolean"
     },
-    "GARDENA getrennt": {
+    "GARDENAGetrennt": {
       "description": "Verbindung zum GARDENA Gateway verloren",
       "type": "boolean"
     },
-    "Bewässerung gestartet": {
+    "BewaesserungGestartet": {
       "description": "Bewässerung wurde gestartet",
       "type": "boolean"
     },
-    "Bewässerung gestoppt": {
+    "BewaesserungGestoppt": {
       "description": "Bewässerung wurde beendet",
       "type": "boolean"
     },
-    "Batteriestand niedrig": {
+    "BatteriestandNiedrig": {
       "description": "Batteriestand des Ventils ist niedrig",
       "type": "boolean"
     },
-    "Bewässerungsfehler": {
+    "Bewaesserungsfehler": {
       "description": "GARDENA Gateway hat einen Steuerbefehl abgelehnt",
       "type": "boolean"
     }
